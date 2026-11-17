@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>사진 전송</title>
+  <!-- PWA 설정 -->
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#2563eb">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, sans-serif; background: #f5f6f8; color: #222; }
+    header { padding: 24px 16px; text-align: center; background: #fff; border-bottom: 1px solid #e5e7eb; }
+    h1 { margin: 0 0 16px; font-size: 22px; }
+    .big-btn { display: inline-block; width: 100%; max-width: 360px; padding: 18px; font-size: 18px;
+      color: #fff; background: #2563eb; border: none; border-radius: 12px; cursor: pointer; }
+    #status { min-height: 20px; margin-top: 12px; font-size: 14px; }
+    main { max-width: 1000px; margin: 0 auto; padding: 16px; }
+    .list-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .list-head h2 { margin: 0; font-size: 18px; }
+    button { padding: 8px 12px; border: 1px solid #d1d5db; background: #fff; border-radius: 8px; cursor: pointer; }
+    /* 썸네일 그리드: 화면 폭에 맞춰 칸 수가 자동으로 바뀜 */
+    #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+    .card { background: #fff; border-radius: 10px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+    .card img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; }
+    .card button { width: 100%; border: none; border-top: 1px solid #eee; border-radius: 0; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>📷 사진 전송</h1>
+    <!-- 숨겨진 파일 입력: capture="environment" 는 모바일에서 후면 카메라를 엽니다 -->
+    <input id="fileInput" type="file" accept="image/*" capture="environment" hidden>
+    <button class="big-btn" onclick="fileInput.click()">사진 찍기</button>
+    <div id="status"></div>
+  </header>
+
+  <main>
+    <div class="list-head">
+      <h2>사진 목록</h2>
+      <button onclick="loadPhotos()">새로고침</button>
+    </div>
+    <div id="grid"></div>
+  </main>
+
+  <!-- Supabase 라이브러리(CDN)와 설정 파일 불러오기 -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="config.js"></script>
+  <script>
+    // Supabase 연결 객체 만들기
+    const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    const BUCKET = 'photos';                         // 사용할 버킷 이름
+    const statusEl = document.getElementById('status');
+    const grid = document.getElementById('grid');
+
+    // 상태 메시지 표시 (색상 포함)
+    function setStatus(text, color) {
+      statusEl.textContent = text;
+      statusEl.style.color = color || '#555';
+    }
+
+    // ① 사진을 고르면(찍으면) 업로드
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files[0];
+      if (!file) return;                             // 취소한 경우 아무것도 안 함
+
+      // 파일명: 타임스탬프-랜덤문자.jpg
+      const random = Math.random().toString(36).slice(2, 8);
+      const fileName = `${Date.now()}-${random}.jpg`;
+
+      setStatus('업로드 중...');
+      const { error } = await db.storage.from(BUCKET).upload(fileName, file, {
+        contentType: file.type || 'image/jpeg'
+      });
+
+      if (error) {
+        setStatus('업로드 실패: ' + error.message, '#dc2626');
+      } else {
+        setStatus('업로드 성공!', '#16a34a');
+        loadPhotos();                                // 목록 다시 불러오기
+      }
+      fileInput.value = '';                          // 같은 사진을 다시 골라도 동작하도록 초기화
+    });
+
+    // ② 버킷의 사진 목록을 최신순으로 불러와 화면에 표시
+    async function loadPhotos() {
+      grid.textContent = '불러오는 중...';
+      const { data, error } = await db.storage.from(BUCKET).list('', {
+        limit: 100,
+        sortBy: { column: 'created_at', order: 'desc' }  // 최신순
+      });
+
+      if (error) {
+        grid.textContent = '목록을 불러오지 못했습니다: ' + error.message;
+        return;
+      }
+
+      // Supabase가 자동으로 만드는 빈 폴더용 파일은 제외
+      const files = data.filter(f => f.name !== '.emptyFolderPlaceholder');
+      if (files.length === 0) {
+        grid.textContent = '아직 사진이 없습니다.';
+        return;
+      }
+
+      grid.innerHTML = '';
+      for (const f of files) {
+        // 공개 버킷이므로 누구나 볼 수 있는 주소를 얻을 수 있음
+        const url = db.storage.from(BUCKET).getPublicUrl(f.name).data.publicUrl;
+
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = `<img src="${url}" alt="${f.name}" loading="lazy"><button>다운로드</button>`;
+        card.querySelector('button').onclick = () => downloadPhoto(url, f.name);
+        grid.appendChild(card);
+      }
+    }
+
+    // ③ 다운로드: 다른 도메인 파일은 download 속성이 안 먹으므로 blob으로 받아서 저장
+    async function downloadPhoto(url, fileName) {
+      try {
+        const res = await fetch(url);                // 파일 내용 받기
+        const blob = await res.blob();               // 바이너리(blob)로 변환
+        const blobUrl = URL.createObjectURL(blob);   // 브라우저 안의 임시 주소 만들기
+
+        const a = document.createElement('a');       // 보이지 않는 링크를 만들어
+        a.href = blobUrl;
+        a.download = fileName;                       // 저장될 파일 이름
+        a.click();                                   // 클릭 → 저장
+
+        URL.revokeObjectURL(blobUrl);                // 임시 주소 정리
+      } catch (e) {
+        alert('다운로드 실패: ' + e.message);
+      }
+    }
+
+    // 서비스 워커 등록 (홈 화면 추가/앱 설치용)
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js');
+    }
+
+    // 페이지가 열리면 목록 먼저 불러오기
+    loadPhotos();
+  </script>
+</body>
+</html>
